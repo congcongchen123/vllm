@@ -971,6 +971,7 @@ def init_distributed_environment(
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
+    context_parallel_size: int = 1,
     backend: Optional[str] = None,
 ) -> None:
     """
@@ -1002,11 +1003,12 @@ def initialize_model_parallel(
         get_world_group().device_group)
 
     if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+            tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
-            f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
+            f"pipeline_model_parallel_size ({pipeline_model_parallel_size}) x "
+            f"context_parallel_size ({context_parallel_size})")
 
     # Build the tensor model-parallel groups.
     num_tensor_model_parallel_groups: int = (world_size //
@@ -1059,7 +1061,8 @@ def ensure_model_parallel_initialized(
         get_world_group().device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+                                  pipeline_model_parallel_size, 
+                                  context_parallel_size, backend)
         return
 
     assert (
@@ -1080,6 +1083,9 @@ def model_parallel_is_initialized():
 
 
 def initialize_context_parallel(
+    tensor_model_parallel_size: int,
+    pipeline_model_parallel_size: int,
+    context_parallel_size: int,
     backend: Optional[str] = None
 ) -> None:
     """
@@ -1090,16 +1096,36 @@ def initialize_context_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
+    if (world_size !=
+            tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size):
+        raise RuntimeError(
+            f"world_size ({world_size}) is not equal to "
+            f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
+            f"pipeline_model_parallel_size ({pipeline_model_parallel_size}) x "
+            f"context_parallel_size ({context_parallel_size})")
+    
     global _CP
     assert _CP is None, ("context parallel group is already initialized")
+    group_ranks = []
+    pipeline_each_stage_size = tensor_model_parallel_size * context_parallel_size
+    for i in range(pipeline_model_parallel_size):
+        start_rank = i * pipeline_each_stage_size
+        next_start_rank = (i + 1) * pipeline_each_stage_size
+        for j in range(tensor_model_parallel_size):
+            ranks = list(range(start_rank + j, 
+                               next_start_rank, tensor_model_parallel_size))
+            group_ranks.append(ranks)
+        
+
     _CP = GroupCoordinator(
-        group_ranks=[list(range(torch.distributed.get_world_size()))],
+        group_ranks=group_ranks,
         local_rank=get_world_group().local_rank,
         torch_distributed_backend=backend,
         use_pynccl=False,
         use_custom_allreduce=False,
         use_tpu_communicator=False,
-        group_name="CP",
+        use_message_queue_broadcaster=False,
+        group_name="cp",
     )
 
 
@@ -1110,6 +1136,8 @@ def context_parallel_is_initialized():
 
 def ensure_context_parallel_initialized(
     tensor_model_parallel_size: int,
+    pipeline_model_parallel_size: int,
+    context_parallel_size: int,
     backend: Optional[str] = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1118,21 +1146,18 @@ def ensure_context_parallel_initialized(
     """
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    if not model_parallel_is_initialized():
-        initialize_model_parallel(tensor_model_parallel_size,
-                                  pipeline_model_parallel_size, backend)
+    if not context_parallel_is_initialized():
+        initialize_context_parallel(tensor_model_parallel_size,
+                                    pipeline_model_parallel_size, 
+                                    context_parallel_size, backend)
         return
 
+    cp_world_size = get_cp_group().world_size
     assert (
-        get_tensor_model_parallel_world_size() == tensor_model_parallel_size
-    ), ("tensor parallel group already initialized, but of unexpected size: "
-        f"{get_tensor_model_parallel_world_size()=} vs. "
-        f"{tensor_model_parallel_size=}")
-    pp_world_size = get_pp_group().world_size
-    assert (pp_world_size == pipeline_model_parallel_size), (
-        "pipeline parallel group already initialized, but of unexpected size: "
-        f"{pp_world_size=} vs. "
-        f"{pipeline_model_parallel_size=}")
+        cp_world_size == context_parallel_size
+    ), ("context parallel group already initialized, but of unexpected size: "
+        f"{cp_world_size=} vs. "
+        f"{context_parallel_size=}")
     
 
 _TP_STATE_PATCHED = False
