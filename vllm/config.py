@@ -792,6 +792,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
+        context_parallel_size: Number of context parallel groups.
         worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
@@ -813,6 +814,7 @@ class ParallelConfig:
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
+        context_parallel_size: int,
         worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
@@ -824,13 +826,14 @@ class ParallelConfig:
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
+        self.context_parallel_size = context_parallel_size
         self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        self.world_size = pipeline_parallel_size * self.tensor_parallel_size * self.context_parallel_size
 
         if worker_use_ray:
             if self.distributed_executor_backend is None:
