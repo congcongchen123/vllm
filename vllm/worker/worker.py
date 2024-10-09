@@ -258,7 +258,8 @@ class Worker(LocalOrDistributedWorkerBase):
         """
         raise_if_cache_size_invalid(num_gpu_blocks,
                                     self.cache_config.block_size,
-                                    self.model_config.max_model_len)
+                                    self.model_config.max_model_len,
+                                    self.parallel_config.context_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -479,16 +480,16 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
-                                max_model_len) -> None:
+                                max_model_len, context_parallel_size) -> None:
     if num_gpu_blocks <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
     max_seq_len = block_size * num_gpu_blocks
-    if max_model_len > max_seq_len:
+    if max_model_len > max_seq_len * context_parallel_size:
         raise ValueError(
             f"The model's max seq len ({max_model_len}) "
             "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
+            f"stored in KV cache ({max_seq_len * context_parallel_size}). Try increasing "
             "`gpu_memory_utilization` or decreasing `max_model_len` when "
             "initializing the engine.")
