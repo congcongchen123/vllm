@@ -66,16 +66,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        context_parallel_idx: int = 0,
+        context_parallel_size: int = 1,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
+        self.context_parallel_idx = context_parallel_idx
+        self.context_parallel_size = context_parallel_size
 
         self.sliding_window = sliding_window
         # max_block_sliding_window is the max number of blocks that need to be
         # allocated
         self.max_block_sliding_window = None
         if sliding_window is not None:
+            if context_parallel_size > 1:
+                # The sliding window is not supported with context parallelism
+                raise ValueError(
+                    "Sliding window is not supported with context parallelism")
             # +1 here because // rounds down
             num_blocks = sliding_window // block_size + 1
             # +1 here because the last block may not be full,
@@ -106,6 +114,20 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
+    def get_token_id_partition(self, seq: Sequence) -> List[int]:
+        token_ids = seq.get_token_ids()
+        base_partition_size = len(token_ids) // self.context_parallel_size
+        remainder = len(token_ids) % self.context_parallel_size 
+        if self.context_parallel_idx < remainder:
+            start = self.context_parallel_idx * (base_partition_size + 1)
+            end = start + base_partition_size + 1
+        else:
+            start = remainder * (base_partition_size + 1) + \
+                (self.context_parallel_idx - remainder) * self.context_parallel_size
+            end = start + base_partition_size
+        # Return the requested partition
+        return token_ids[start:end]
+
     def can_allocate(self,
                      seq_group: SequenceGroup,
                      num_lookahead_slots: int = 0) -> AllocStatus:
@@ -114,9 +136,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
+        if (num_lookahead_slots > 0 and self.context_parallel_size > 1):
+            raise ValueError(
+                "Lookahead slots are not supported with context parallelism")
+
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
+            self.get_token_id_partition(seq),
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
@@ -125,7 +151,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                encoder_seq.get_token_ids(),
+                self.get_token_id_partition(encoder_seq),
                 block_size=self.block_size,
             )
 
@@ -151,7 +177,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(seq.get_token_ids())
+        block_table.allocate(self.get_token_id_partition(seq.get_token_ids()))
 
         return block_table
 

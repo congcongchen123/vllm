@@ -303,6 +303,7 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
         output_proc_callback: Optional[Callable] = None,
+        context_parallel_size: int = 1,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -310,6 +311,7 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+        self.context_parallel_size = context_parallel_size
 
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
@@ -329,12 +331,24 @@ class Scheduler:
             num_cpu_blocks //= pipeline_parallel_size
 
         # Create the block space manager.
-        self.block_manager = BlockSpaceManagerImpl(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+        # self.block_manager = BlockSpaceManagerImpl(
+        #     block_size=self.cache_config.block_size,
+        #     num_gpu_blocks=num_gpu_blocks,
+        #     num_cpu_blocks=num_cpu_blocks,
+        #     sliding_window=self.cache_config.sliding_window,
+        #     enable_caching=self.cache_config.enable_prefix_caching)
+        
+        self.block_managers = [
+            BlockSpaceManagerImpl(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=num_gpu_blocks,
+                num_cpu_blocks=num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window,
+                enable_caching=self.cache_config.enable_prefix_caching,
+                context_parallel_id=i,
+                context_parallel_size = context_parallel_size)
+            for i in range(context_parallel_size)
+        ]
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -811,7 +825,7 @@ class Scheduler:
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
                 #Only preempt if waiting sequence cannot be allocated
-                can_allocate = self.block_manager.can_allocate(seq_group)
+                can_allocate = self.block_managers[self.context_parallel_size-1].can_allocate(seq_group)
                 if (num_new_tokens and can_allocate == AllocStatus.OK
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
                                                 num_new_seqs=num_new_seqs)):
@@ -907,7 +921,7 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
-            can_allocate = self.block_manager.can_allocate(
+            can_allocate = self.block_managers[self.context_parallel_size-1].can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
                 break
@@ -1016,6 +1030,8 @@ class Scheduler:
 
         if len(prefills.seq_groups
                ) == 0 and self.scheduler_config.policy == "priority":
+            # priority-based scheduling is not supported with context parallelism
+            assert(self.context_parallel_size == 1)
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
@@ -1408,7 +1424,8 @@ class Scheduler:
             self._async_stopped.clear()
 
     def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+        for block_manager in self.block_managers:
+            block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
 
