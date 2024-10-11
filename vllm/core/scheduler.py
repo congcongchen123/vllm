@@ -347,7 +347,7 @@ class Scheduler:
                 enable_caching=self.cache_config.enable_prefix_caching,
                 context_parallel_id=i,
                 context_parallel_size = context_parallel_size)
-            for i in range(context_parallel_size)
+            for i in range(context_parallel_size-1, -1, -1)
         ]
 
         # Sequence groups in the WAITING state.
@@ -1255,7 +1255,7 @@ class Scheduler:
             # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
-            block_tables: Dict[int, List[int]] = {}
+            block_tables: Dict[int, List[List[int]]] = {}
 
             if seq_group.is_encoder_decoder():
                 # Encoder associated with SequenceGroup
@@ -1264,7 +1264,8 @@ class Scheduler:
                 encoder_seq_data = encoder_seq.data
                 # Block table for cross-attention
                 # Also managed at SequenceGroup level
-                cross_block_table = self.block_manager.get_cross_block_table(
+                assert(len(self.block_managers) == 1)
+                cross_block_table = self.block_managers[0].get_cross_block_table(
                     seq_group)
             else:
                 encoder_seq_data = None
@@ -1273,12 +1274,15 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                self.block_manager.access_all_blocks_in_seq(seq, now)
+                block_tables[seq_id] = [block_manager.get_block_table(seq) 
+                                        for block_manager in self.block_managers]
+                for block_manager in self.block_managers:
+                    block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
+                assert(len(self.block_managers) == 1)
                 common_computed_block_nums = (
-                    self.block_manager.get_common_computed_block_ids(
+                    self.block_managers[0].get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
             do_sample = True
@@ -1352,9 +1356,10 @@ class Scheduler:
         # This is because the engine assumes that a failure in model execution
         # will crash the vLLM instance / will not retry.
         for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-            self.block_manager.mark_blocks_as_computed(
-                scheduled_seq_group.seq_group,
-                scheduled_seq_group.token_chunk_size)
+            for block_manager in self.block_managers:
+                block_manager.mark_blocks_as_computed(
+                    scheduled_seq_group.seq_group,
+                    scheduled_seq_group.token_chunk_size)
 
         self._seq_group_metadata_cache[self.next_cache_id].reset()
 
