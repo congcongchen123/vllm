@@ -22,7 +22,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, get_cp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
@@ -480,13 +480,22 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.
-        tokens = seq_data.get_token_ids()[context_len:seq_len]
+        cp_group = get_cp_group()
+        context_parallel_size = cp_group.world_size
+        if context_parallel_size > 0 and inter_data.is_prompt:
+            assert context_len == 0
+            tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
+            input_positions = range(context_len, seq_len)
+            seq_len = len(tokens)
+        else:
+            tokens = seq_data.get_token_ids()[context_len:seq_len]
+            input_positions = range(context_len, seq_len)
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
-        inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
+        inter_data.input_positions[seq_idx].extend(input_positions)
         inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
@@ -692,11 +701,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if self.runner.model_config.is_encoder_decoder_model:
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
+        
+        context_parallel_rank = get_cp_group().rank
         inter_data = self.init_cached_inter_data(
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
             is_prompt=is_prompt,
-            block_tables=seq_group_metadata.block_tables,
+            block_tables=seq_group_metadata.block_tables[context_parallel_rank],
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
             reinit_use_defaults=True,
