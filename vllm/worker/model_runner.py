@@ -484,8 +484,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         context_parallel_size = cp_group.world_size
         if context_parallel_size > 0 and inter_data.is_prompt:
             assert context_len == 0
-            tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
             input_positions = range(context_len, seq_len)
+            # Get the query token ids for the current context parallel rank.
+            tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
             seq_len = len(tokens)
         else:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
@@ -707,7 +708,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             request_id=seq_group_metadata.request_id,
             seq_ids=seq_ids,
             is_prompt=is_prompt,
-            block_tables=seq_group_metadata.block_tables[context_parallel_rank],
+            block_tables={key: value[context_parallel_rank] for key, value in seq_group_metadata.block_tables},
             computed_block_nums=seq_group_metadata.computed_block_nums,
             reinit=True,
             reinit_use_defaults=True,

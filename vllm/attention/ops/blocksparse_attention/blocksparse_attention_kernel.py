@@ -19,7 +19,7 @@ def blocksparse_flash_attn_varlen_fwd(
 
     assert isinstance(sparse_layout, (list, tuple))
 
-    _, n_heads, head_size = q.shape
+    n_tokens, n_heads, head_size = q.shape
     batch_size = cu_seqlens_k.size(0) - 1
     q_block_size = q_block_size or block_size
 
@@ -72,6 +72,7 @@ def blocksparse_flash_attn_varlen_fwd(
     )
 
     out = q.new_empty(q.shape)
+    lse = torch.empty((n_heads, n_tokens), dtype=torch.float32, device=q.device)
     cu_seqlens_q = cu_seqlens_q.contiguous()
     cu_seqlens_k = cu_seqlens_k.contiguous()
 
@@ -86,6 +87,7 @@ def blocksparse_flash_attn_varlen_fwd(
         k,
         v,
         out,
+        lse,
         sm_scale,
         cu_seqlens_q[:-1],
         cu_seqlens_q[1:],
@@ -101,6 +103,7 @@ def blocksparse_flash_attn_varlen_fwd(
         *v.stride(),
         0,
         *out.stride(),
+        *lse.stride(),
         layout_crow_indices,
         layout_col_indices,
         *layout_crow_indices.stride(),
@@ -117,7 +120,7 @@ def blocksparse_flash_attn_varlen_fwd(
         num_warps=1 if decoding_only else 4,
         num_stages=3)
 
-    return out
+    return out, lse
 
 
 @triton.jit
@@ -229,6 +232,7 @@ def _fwd_kernel_batch_inference(
     K,
     V,
     Out,
+    Lse,
     sm_scale,
     q_batch_starts,
     q_batch_ends,
@@ -252,6 +256,8 @@ def _fwd_kernel_batch_inference(
     stride_ot,
     stride_oh,
     stride_od,
+    stride_lseh,
+    stride_lset,
     layout_crow_ptr,
     layout_col_ptr,
     layout_crow_stride_h,
@@ -405,8 +411,12 @@ def _fwd_kernel_batch_inference(
     )
 
     # flash-attn 2
+    # reuse m_i to store lse
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
+    # write back l and m
+    lse_ptrs = Lse + off_h * stride_lseh  + offs_m * stride_lset
+    tl.store(lse_ptrs, m_i, mask=offs_m < q_seqlen)
 
     # write output
     if EVEN_D:
