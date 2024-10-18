@@ -807,6 +807,57 @@ class GroupCoordinator:
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def send_recv(self, 
+                  send_tensor: torch.Tensor, 
+                  recv_tensor: torch.Tensor, 
+                  send_dst: Optional[int] = None, 
+                  recv_src: Optional[int] = None, 
+                  batch_p2p_comm: bool = True):
+        """Point-to-point communications of KV and dKV in Attention with context parallelism"""
+        send_recv_ops = []
+
+        if recv_src is None:
+            recv_src = (self.rank_in_group - 1) % self.world_size
+
+        if send_dst is None:
+            send_dst = (self.rank_in_group + 1) % self.world_size
+
+        if batch_p2p_comm:
+            if self.rank_in_group % 2 == 0:
+                send_op = torch.distributed.P2POp(
+                    torch.distributed.isend, send_tensor, self.ranks[send_dst], self.device_group
+                )
+                recv_op = torch.distributed.P2POp(
+                    torch.distributed.irecv, recv_tensor, self.ranks[recv_src], self.device_group
+                )
+                send_recv_ops.append(send_op)
+                send_recv_ops.append(recv_op)
+            else:
+                recv_op = torch.distributed.P2POp(
+                    torch.distributed.irecv, recv_tensor, self.ranks[recv_src], self.device_group
+                )
+                send_op = torch.distributed.P2POp(
+                    torch.distributed.isend, send_tensor, self.ranks[send_dst], self.device_group
+                )
+                send_recv_ops.append(recv_op)
+                send_recv_ops.append(send_op)
+            send_recv_reqs = torch.distributed.batch_isend_irecv(send_recv_ops)
+        else:
+            if self.rank_in_group % 2 == 0:
+                send_op = torch.distributed.isend(send_tensor, self.ranks[send_dst], self.device_group)
+                recv_op = torch.distributed.irecv(recv_tensor, self.ranks[recv_src], self.device_group)
+                send_recv_ops.append(send_op)
+                send_recv_ops.append(recv_op)
+            else:
+                recv_op = torch.distributed.irecv(recv_tensor, self.ranks[recv_src], self.device_group)
+                send_op = torch.distributed.isend(send_tensor, self.ranks[send_dst], self.device_group)
+                send_recv_ops.append(recv_op)
+                send_recv_ops.append(send_op)
+            send_recv_reqs = send_recv_ops
+
+        return send_recv_reqs
+
+
     def destroy(self):
         if self.device_group is not None:
             torch.distributed.destroy_process_group(self.device_group)

@@ -8,7 +8,7 @@ from transformers.configuration_utils import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size, get_cp_group)
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -143,6 +143,10 @@ class Phi3SmallSelfAttention(nn.Module):
             1, self.num_key_value_heads // self.tp_size)
         self.num_heads_per_partition = self.num_heads // self.tp_size
 
+        # context parallel
+        self.cp_size = get_cp_group().world_size
+        self.cp_rank = get_cp_group().rank
+
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_embedding_base = config.rope_embedding_base
         self.rope_position_scale = config.rope_position_scale
@@ -244,7 +248,31 @@ class Phi3SmallSelfAttention(nn.Module):
         v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
+
+        next_k, next_v = None, None
+        send_recv_reqs = []
+
+        for step in range(self.cp_size):
+            # Only need to exchange kv for cp_size - 1 times
+            if step < self.cp_size - 1:
+                # Send KV to next rank asynchronously.
+                # This way, we could overlap the communication with computation
+                # as much as possible.
+                send_recv_reqs.extend(get_cp_group().send_recv(k, next_k))
+                send_recv_reqs.extend(get_cp_group().send_recv(v, next_v))
+                
+            if step <= self.cp_rank:
+                attn_output, lse = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
+                out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+
+            # wait until KV is received
+            for req in send_recv_reqs:
+                req.wait()
+                send_recv_reqs.clear()
+                k = next_k
+                v = next_v
+
+
         output, _ = self.dense(attn_output)
 
         return output
