@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import torch.nn.functional as F
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -11,7 +12,8 @@ from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              get_cp_group)
 
 
 @dataclass
@@ -345,6 +347,106 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             active_head_range=self.blocksparse_params.active_head_range,
         )
 
+
+    @torch.jit.script
+    def _update_out_and_lse(
+        self,
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        block_out: torch.Tensor,
+        block_lse: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        # shape (n_tokens, n_heads, head_size)
+        block_out = block_out.to(torch.float32)
+        # Before transpose and unsqueeze, the shape is (n_heads, n_tokens)
+        block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+
+        new_lse = lse + torch.log2(1 + torch.exp2(block_lse - lse))
+        out = torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
+        # For additional context and discussion, please refer to:
+        # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
+        # out = out - F.sigmoid(block_lse - lse) * (out - block_out)
+        # lse = lse - F.logsigmoid(lse - block_lse)
+        return out, new_lse
+
+    def update_out_and_lse(
+        self,
+        out: Optional[torch.Tensor],
+        lse: Optional[torch.Tensor],
+        block_out: torch.Tensor,
+        block_lse: torch.Tensor,
+        slice_=None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if out is None:
+            if slice_ is not None:
+                raise RuntimeError("first update_out_and_lse should not pass slice_ args")
+            out = block_out.to(torch.float32)
+            lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+        elif slice_ is not None:
+            slice_out, slice_lse = out[slice_], lse[slice_]
+            slice_out, slice_lse = self._update_out_and_lse(
+                slice_out, slice_lse, block_out, block_lse
+            )
+            out[slice_], lse[slice_] = slice_out, slice_lse
+        else:
+            out, lse = self._update_out_and_lse(out, lse, block_out, block_lse)
+        return out, lse
+
+
+    def ring_prefill_forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[Tuple[torch.Tensor]]]:
+        assert attn_metadata.prefill_metadata is not None
+
+        next_k, next_v = None, None
+        send_recv_reqs = []
+        cp_size = get_cp_group().world_size
+        cp_rank = get_cp_group().rank_in_group
+        if cp_size == 1:
+            return self.bs_attn(
+                q,
+                k,
+                v,
+                cu_seqlens_q=attn_metadata.prefill_meta.seq_start_loc,
+                cu_seqlens_k=attn_metadata.prefill_meta.seq_start_loc,
+                sm_scale=self.scale,
+            )
+
+        for step in range(cp_size):
+            # Only need to exchange kv for cp_size - 1 times
+            if step < cp_size - 1:
+                # Send KV to next rank asynchronously.
+                # This way, we could overlap the communication with computation
+                # as much as possible.
+                send_recv_reqs.extend(get_cp_group().send_recv(k, next_k))
+                send_recv_reqs.extend(get_cp_group().send_recv(v, next_v))
+                
+            if step <= cp_rank:
+                block_out, block_lse = self.bs_attn(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=attn_metadata.prefill_meta.seq_start_loc,
+                    cu_seqlens_k=attn_metadata.prefill_meta.seq_start_loc,
+                    sm_scale=self.scale,
+                )
+                out, lse = self.update_out_and_lse(out, lse, block_out, block_lse)
+
+            # wait until KV is received
+            for req in send_recv_reqs:
+                req.wait()
+                send_recv_reqs.clear()
+                k = next_k
+                v = next_v
+
+        return out
+    
     def forward(
         self,
         query: torch.Tensor,
@@ -412,13 +514,20 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     or prefill_meta.block_tables.numel() == 0, \
                 "Does not support prefix-enabled attention."
 
-            output = self.bs_attn(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=prefill_meta.seq_start_loc,
-                cu_seqlens_k=prefill_meta.seq_start_loc,
-                sm_scale=self.scale,
+            # output = self.bs_attn(
+            #     q=query,
+            #     k=key,
+            #     v=value,
+            #     cu_seqlens_q=prefill_meta.seq_start_loc,
+            #     cu_seqlens_k=prefill_meta.seq_start_loc,
+            #     sm_scale=self.scale,
+            # )
+
+            output = self.ring_prefill_forward(
+                query,
+                key,
+                value,
+                attn_metadata,
             )
 
         if decode_meta := attn_metadata.decode_metadata:
