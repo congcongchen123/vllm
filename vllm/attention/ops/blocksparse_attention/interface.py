@@ -104,6 +104,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
                     v,
                     cu_seqlens_k,
                     cu_seqlens_q=None,
+                    query_offsets_in_sequence_tensor=None,
                     sm_scale=None):
         """
         q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
@@ -134,6 +135,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             v,
             cu_seqlens_k,
             cu_seqlens_q,
+            query_offsets_in_sequence_tensor,
             sm_scale,
             self.sparse_layout,
             block_size=self.block_size,
@@ -200,7 +202,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             q2, k2, v2, attn_mask=attn_mask, scale=sm_scale)
         return self.transpose_and_unpad(spda_output, cu_seqlens)
 
-    def forward(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
+    def forward(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, query_offsets_in_sequence_tensor=None, sm_scale=None):
         """Dispatch to `varlen_attn` (Ampere or newer) or 
         `self.spda`(cpu, Volta, Turing or older)based on 
         the type of device used and cuda compute capability.
@@ -235,4 +237,5 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
                                 v,
                                 cu_seqlens_k,
                                 cu_seqlens_q=cu_seqlens_q,
+                                query_offsets_in_sequence_tensor=query_offsets_in_sequence_tensor,
                                 sm_scale=sm_scale)

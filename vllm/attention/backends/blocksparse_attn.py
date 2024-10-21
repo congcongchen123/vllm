@@ -174,6 +174,10 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+    # The offset of the query in the sequence.
+    # This is required for context parallel since different partitions 
+    # starts with different offset.
+    query_offsets_in_sequence_tensor: Optional[torch.Tensor]
 
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
@@ -230,6 +234,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            query_offsets_in_sequence_tensor=self.query_offsets_in_sequence_tensor[:self.num_prefills],
         )
         return self._cached_prefill_metadata
 
@@ -415,6 +420,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 v,
                 cu_seqlens_q=attn_metadata.prefill_meta.seq_start_loc,
                 cu_seqlens_k=attn_metadata.prefill_meta.seq_start_loc,
+                query_offsets_in_sequence_tensor=attn_metadata.prefill_meta.query_offsets_in_sequence_tensor,
                 sm_scale=self.scale,
             )
 
@@ -434,6 +440,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     v=v,
                     cu_seqlens_q=attn_metadata.prefill_meta.seq_start_loc,
                     cu_seqlens_k=attn_metadata.prefill_meta.seq_start_loc,
+                    query_offsets_in_sequence_tensor=attn_metadata.prefill_meta.query_offsets_in_sequence_tensor,
                     sm_scale=self.scale,
                 )
                 out, lse = self.update_out_and_lse(out, lse, block_out, block_lse)

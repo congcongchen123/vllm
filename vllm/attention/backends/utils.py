@@ -126,6 +126,10 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.slot_mapping: List[int] = []
         self.prefill_seq_lens: List[int] = []
+        # The offset of the query in the sequence.
+        # This is required for context parallel since different partitions 
+        # starts with different offset.
+        self.query_offsets_in_sequence: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
@@ -159,6 +163,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
+                self.query_offsets_in_sequence.append(inter_data.input_positions[seq_id][0])
             else:
                 assert query_len == 1, (
                     "seq_len: {}, context_len: {}, query_len: {}".format(
@@ -247,6 +252,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
+        query_offsets_in_sequence_tensor = async_tensor_h2d(self.query_offsets_in_sequence, 
+                                                     torch.long, 
+                                                     device, self.runner.pin_memory)
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -271,6 +279,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            query_offsets_in_sequence_tensor=query_offsets_in_sequence_tensor,
         )
 
 
