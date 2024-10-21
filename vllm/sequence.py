@@ -281,15 +281,9 @@ class SequenceData(msgspec.Struct,
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
     
-    def get_token_ids_by_partition(self, context_parallel_rank, context_parallel_size) -> List[int]:
-        assert context_parallel_rank < context_parallel_size and context_parallel_rank >= 0
-        assert context_parallel_size > 0
-        if context_parallel_size == 1:
-            return self.get_token_ids()
-        # Get the partition
-        token_ids = self.get_token_ids()
-        base_partition_size = len(token_ids) // context_parallel_size
-        remainder = len(token_ids) % context_parallel_size 
+    def get_start_end_index_by_partition(self, context_parallel_rank, context_parallel_size) -> Tuple[int, int]:
+        base_partition_size = len(self.get_token_ids()) // context_parallel_size
+        remainder = len(self.get_token_ids()) % context_parallel_size 
         if context_parallel_rank < remainder:
             start = context_parallel_rank * (base_partition_size + 1)
             end = start + base_partition_size + 1
@@ -297,8 +291,17 @@ class SequenceData(msgspec.Struct,
             start = remainder * (base_partition_size + 1) + \
                 (context_parallel_rank - remainder) * context_parallel_size
             end = start + base_partition_size
+        return start, end
+    
+    def get_token_ids_by_partition(self, context_parallel_rank, context_parallel_size) -> List[int]:
+        assert context_parallel_rank < context_parallel_size and context_parallel_rank >= 0
+        assert context_parallel_size > 0
+        if context_parallel_size == 1:
+            return self.get_token_ids()
+        # Get the partition
+        start, end = self.get_start_end_index_by_partition(context_parallel_rank, context_parallel_size)
         # Return the requested partition
-        return token_ids[start:end]
+        return self.get_token_ids()[start:end]
 
     def get_prefix_token_ids(
             self, num_tokens: int

@@ -482,11 +482,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Compute tokens.
         cp_group = get_cp_group()
         context_parallel_size = cp_group.world_size
-        if context_parallel_size > 0 and inter_data.is_prompt:
+        if context_parallel_size > 1 and inter_data.is_prompt:
             assert context_len == 0
-            input_positions = range(context_len, seq_len)
             # Get the query token ids for the current context parallel rank.
             tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
+            start_idx, end_idx = seq_data.get_start_end_index_by_partition(cp_group.rank, context_parallel_size)
+            input_positions = range(start_idx, end_idx)
             seq_len = len(tokens)
         else:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
