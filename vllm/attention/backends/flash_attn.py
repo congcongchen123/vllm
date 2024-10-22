@@ -709,6 +709,7 @@ def ring_prefill_forward(
                     window_size=window_size,
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
+                    return_softmax=True,
                 )
                 out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
@@ -721,6 +722,57 @@ def ring_prefill_forward(
 
         return out
     
+
+def ring_decode_forward(
+    decode_query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    attn_metadata: AttentionMetadata,
+    softmax_scale: float,
+    window_size: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    logits_soft_cap: Optional[float] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+            Optional[Tuple[torch.Tensor]]]:
+    cp_size = get_cp_group().world_size
+    cp_rank = get_cp_group().rank_in_group
+    decode_meta = attn_metadata.decode_metadata
+    if cp_size == 1:
+        return flash_attn_with_kvcache(
+            q=decode_query,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            block_table=decode_meta.block_tables,
+            cache_seqlens=decode_meta.seq_lens_tensor,
+            softmax_scale=softmax_scale,
+            causal=True,
+            alibi_slopes=alibi_slopes,
+            softcap=logits_soft_cap,
+        ).squeeze(1)
+    
+    block_out, block_lse = flash_attn_with_kvcache(
+        q=decode_query,
+        k_cache=key_cache,
+        v_cache=value_cache,
+        block_table=decode_meta.block_tables,
+        cache_seqlens=decode_meta.seq_lens_tensor,
+        softmax_scale=softmax_scale,
+        causal=cp_rank == cp_size - 1,
+        alibi_slopes=alibi_slopes,
+        softcap=logits_soft_cap,
+        return_softmax=True,
+    ).squeeze(1)
+
+    # gather outputs from all ranks into rank 0
+    block_outs = get_cp_group().gather(block_out, 0)
+    block_lses = get_cp_group().gather(block_lse, 0)
+
+    out = block_out
+    lse = block_lse
+    for idx in range(1, len(block_outs)):
+        out, lse = update_out_and_lse(out, lse, block_outs[idx], block_lses[idx])
+    return out, lse
+
 
 @torch.library.custom_op("vllm::unified_flash_attention",
                          mutates_args=["kv_cache"])
@@ -847,10 +899,22 @@ def unified_flash_attention(
         _, num_head, head_dim = decode_query.shape
         decode_query = decode_query.reshape(-1, decode_meta.decode_query_len,
                                             num_head, head_dim)
-        decode_output = flash_attn_with_kvcache(
-            q=decode_query,
-            k_cache=key_cache,
-            v_cache=value_cache,
+        # decode_output = flash_attn_with_kvcache(
+        #     q=decode_query,
+        #     k_cache=key_cache,
+        #     v_cache=value_cache,
+        #     block_table=decode_meta.block_tables,
+        #     cache_seqlens=decode_meta.seq_lens_tensor,
+        #     softmax_scale=softmax_scale,
+        #     causal=True,
+        #     alibi_slopes=alibi_slopes,
+        #     softcap=logits_soft_cap,
+        # ).squeeze(1)
+
+        decode_output = ring_decode_forward(
+            decode_query=decode_query,
+            key_cache=key_cache,
+            value_cache=value_cache,
             block_table=decode_meta.block_tables,
             cache_seqlens=decode_meta.seq_lens_tensor,
             softmax_scale=softmax_scale,
