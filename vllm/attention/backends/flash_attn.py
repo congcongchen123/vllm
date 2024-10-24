@@ -634,6 +634,12 @@ def update_out_and_lse(
     block_lse: torch.Tensor,
     slice_=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    out: (batch_size, seqlen, nheads, headdim).
+    lst: (batch_size, seqlen, nheads, 1).
+    block_out: (batch_size, seqlen, nheads, headdim).
+    block_lse: (batch_size, nheads, seqlen).
+    """
     if out is None:
         if slice_ is not None:
             raise RuntimeError("first update_out_and_lse should not pass slice_ args")
@@ -732,8 +738,7 @@ def ring_decode_forward(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-            Optional[Tuple[torch.Tensor]]]:
+) -> torch.Tensor:
     cp_size = get_cp_group().world_size
     cp_rank = get_cp_group().rank_in_group
     decode_meta = attn_metadata.decode_metadata
@@ -749,7 +754,7 @@ def ring_decode_forward(
             alibi_slopes=alibi_slopes,
             softcap=logits_soft_cap,
         ).squeeze(1)
-    
+    assert attn_metadata.decode_metadata.decode_query_len == 1
     block_out, block_lse = flash_attn_with_kvcache(
         q=decode_query,
         k_cache=key_cache,
@@ -761,7 +766,7 @@ def ring_decode_forward(
         alibi_slopes=alibi_slopes,
         softcap=logits_soft_cap,
         return_softmax=True,
-    ).squeeze(1)
+    )
 
     # gather outputs from all ranks into rank 0
     block_outs = get_cp_group().gather(block_out, 0)
@@ -921,7 +926,7 @@ def unified_flash_attention(
             causal=True,
             alibi_slopes=alibi_slopes,
             softcap=logits_soft_cap,
-        ).squeeze(1)
+        )
 
     if prefill_output is None:
         assert decode_output is not None
