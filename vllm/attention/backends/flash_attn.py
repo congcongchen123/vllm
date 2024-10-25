@@ -668,15 +668,41 @@ def ring_prefill_forward(
     logits_soft_cap: Optional[float] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
             Optional[Tuple[torch.Tensor]]]:
-        assert attn_metadata.prefill_metadata is not None
+    assert attn_metadata.prefill_metadata is not None
 
-        next_k, next_v = None, None
-        send_recv_reqs = []
-        cp_size = get_cp_group().world_size
-        cp_rank = get_cp_group().rank_in_group
-        prefill_meta = attn_metadata.prefill_metadata
-        if cp_size == 1:
-            return flash_attn_varlen_func(
+    next_k, next_v = None, None
+    send_recv_reqs = []
+    cp_size = get_cp_group().world_size
+    cp_rank = get_cp_group().rank_in_group
+    prefill_meta = attn_metadata.prefill_metadata
+    if cp_size == 1:
+        return flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            cu_seqlens_q=prefill_meta.seq_start_loc,
+            cu_seqlens_k=prefill_meta.seq_start_loc,
+            max_seqlen_q=prefill_meta.max_prefill_seq_len,
+            max_seqlen_k=prefill_meta.max_prefill_seq_len,
+            softmax_scale=softmax_scale,
+            causal=True,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            softcap=logits_soft_cap,
+        )
+
+    for step in range(cp_size):
+        # Only need to exchange kv for cp_size - 1 times
+        if step < cp_size - 1:
+            # Send KV to next rank asynchronously.
+            # This way, we could overlap the communication with computation
+            # as much as possible.
+            send_recv_reqs.extend(get_cp_group().send_recv(key, next_k))
+            send_recv_reqs.extend(get_cp_group().send_recv(value, next_v))
+            
+        if step <= cp_rank:
+            causal = step == 0
+            block_out, block_lse = flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
@@ -685,48 +711,22 @@ def ring_prefill_forward(
                 max_seqlen_q=prefill_meta.max_prefill_seq_len,
                 max_seqlen_k=prefill_meta.max_prefill_seq_len,
                 softmax_scale=softmax_scale,
-                causal=True,
+                causal=causal,
                 window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
+                return_softmax=True,
             )
+            out, lse = update_out_and_lse(out, lse, block_out, block_lse)
 
-        for step in range(cp_size):
-            # Only need to exchange kv for cp_size - 1 times
-            if step < cp_size - 1:
-                # Send KV to next rank asynchronously.
-                # This way, we could overlap the communication with computation
-                # as much as possible.
-                send_recv_reqs.extend(get_cp_group().send_recv(k, next_k))
-                send_recv_reqs.extend(get_cp_group().send_recv(v, next_v))
-                
-            if step <= cp_rank:
-                causal = step == 0
-                block_out, block_lse = flash_attn_varlen_func(
-                    q=query,
-                    k=key,
-                    v=value,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
-                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
-                    softmax_scale=softmax_scale,
-                    causal=causal,
-                    window_size=window_size,
-                    alibi_slopes=alibi_slopes,
-                    softcap=logits_soft_cap,
-                    return_softmax=True,
-                )
-                out, lse = update_out_and_lse(out, lse, block_out, block_lse)
+        # wait until KV is received
+        for req in send_recv_reqs:
+            req.wait()
+            send_recv_reqs.clear()
+            key = next_k
+            value = next_v
 
-            # wait until KV is received
-            for req in send_recv_reqs:
-                req.wait()
-                send_recv_reqs.clear()
-                key = next_k
-                value = next_v
-
-        return out
+    return out
     
 
 def ring_decode_forward(
@@ -755,6 +755,8 @@ def ring_decode_forward(
             softcap=logits_soft_cap,
         ).squeeze(1)
     assert attn_metadata.decode_metadata.decode_query_len == 1
+    assert window_size is None or (window_size[0] == -1 and window_size[1] == -1)
+    assert alibi_slopes is None
     block_out, block_lse = flash_attn_with_kvcache(
         q=decode_query,
         k_cache=key_cache,
@@ -772,11 +774,11 @@ def ring_decode_forward(
     block_outs = get_cp_group().gather(block_out, 0)
     block_lses = get_cp_group().gather(block_lse, 0)
 
-    out = block_out
-    lse = block_lse
-    for idx in range(1, len(block_outs)):
+    out = None
+    lse = None
+    for idx in range(0, len(block_outs)):
         out, lse = update_out_and_lse(out, lse, block_outs[idx], block_lses[idx])
-    return out, lse
+    return out
 
 
 @torch.library.custom_op("vllm::unified_flash_attention",
@@ -920,12 +922,11 @@ def unified_flash_attention(
             decode_query=decode_query,
             key_cache=key_cache,
             value_cache=value_cache,
-            block_table=decode_meta.block_tables,
-            cache_seqlens=decode_meta.seq_lens_tensor,
+            attn_metadata=attn_metadata,
             softmax_scale=softmax_scale,
-            causal=True,
+            window_size=window_size,
             alibi_slopes=alibi_slopes,
-            softcap=logits_soft_cap,
+            logits_soft_cap=logits_soft_cap,
         )
 
     if prefill_output is None:
