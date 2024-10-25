@@ -921,8 +921,9 @@ class Scheduler:
                     True, enable_chunking)
 
             # If the sequence group cannot be allocated, stop.
-            can_allocate = self.block_managers[self.context_parallel_size-1].can_allocate(
-                seq_group, num_lookahead_slots=num_lookahead_slots)
+            can_allocate = all([block_manager.can_allocate(seq_group, num_lookahead_slots=num_lookahead_slots) 
+             for block_manager in self.block_managers])
+            
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:

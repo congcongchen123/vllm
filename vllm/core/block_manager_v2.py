@@ -125,7 +125,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         if (num_lookahead_slots > 0 and self.context_parallel_size > 1):
             raise ValueError(
                 "Lookahead slots are not supported with context parallelism")
-
+        if (seq_group.is_encoder_decoder() and
+                self.context_parallel_size > 1):
+            raise ValueError(
+                "Encoder-decoder is not supported with context parallelism")
+        
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
             seq.get_token_ids_by_partition(self.context_parallel_idx,self.context_parallel_size),
