@@ -114,20 +114,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
-    def get_token_id_partition(self, seq: Sequence) -> List[int]:
-        token_ids = seq.get_token_ids()
-        base_partition_size = len(token_ids) // self.context_parallel_size
-        remainder = len(token_ids) % self.context_parallel_size 
-        if self.context_parallel_idx < remainder:
-            start = self.context_parallel_idx * (base_partition_size + 1)
-            end = start + base_partition_size + 1
-        else:
-            start = remainder * (base_partition_size + 1) + \
-                (self.context_parallel_idx - remainder) * self.context_parallel_size
-            end = start + base_partition_size
-        # Return the requested partition
-        return token_ids[start:end]
-
     def can_allocate(self,
                      seq_group: SequenceGroup,
                      num_lookahead_slots: int = 0) -> AllocStatus:
@@ -142,7 +128,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
-            self.get_token_id_partition(seq),
+            seq.get_token_ids_by_partition(self.context_parallel_idx,self.context_parallel_size),
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
@@ -151,7 +137,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                self.get_token_id_partition(encoder_seq),
+                encoder_seq.get_token_ids_by_partition(self.context_parallel_idx,self.context_parallel_size),
                 block_size=self.block_size,
             )
 
@@ -177,7 +163,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        block_table.allocate(self.get_token_id_partition(seq.get_token_ids()))
+        block_table.allocate(
+            seq.get_token_ids_by_partition(self.context_parallel_idx,self.context_parallel_size)
+        )
 
         return block_table
 
