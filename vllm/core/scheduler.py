@@ -188,9 +188,9 @@ class SchedulerRunningOutputs:
     # Sequences that are swapped out.
     swapped_out: List[SequenceGroup]
     # The blocks to swap out.
-    blocks_to_swap_out: List[Tuple[int, int]]
+    blocks_to_swap_out: List[List[Tuple[int, int]]]
     # The blocks to copy.
-    blocks_to_copy: List[Tuple[int, int]]
+    blocks_to_copy: List[List[Tuple[int, int]]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
 
@@ -226,9 +226,9 @@ class SchedulerSwappedInOutputs:
     # phase. I.e., it means the prefill has been chunked.
     prefill_seq_groups: List[ScheduledSequenceGroup]
     # The blocks to swap in.
-    blocks_to_swap_in: List[Tuple[int, int]]
+    blocks_to_swap_in: List[List[Tuple[int, int]]]
     # The blocks to copy.
-    blocks_to_copy: List[Tuple[int, int]]
+    blocks_to_copy: List[List[Tuple[int, int]]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
     # Infeasible sequence groups.
@@ -542,8 +542,8 @@ class Scheduler:
         ret.prefill_seq_groups_list.clear()
 
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_out: List[Tuple[int, int]] = ret.blocks_to_swap_out
-        blocks_to_copy: List[Tuple[int, int]] = ret.blocks_to_copy
+        blocks_to_swap_out: List[List[Tuple[int, int]]] = ret.blocks_to_swap_out
+        blocks_to_copy: List[List[Tuple[int, int]]] = ret.blocks_to_copy
 
         decode_seq_groups: List[ScheduledSequenceGroup] = ret.decode_seq_groups
         prefill_seq_groups: List[
@@ -697,12 +697,11 @@ class Scheduler:
 
             # If the sequence group cannot be swapped in, stop.
             is_prefill = seq_group.is_prefill()
-            alloc_status = self.block_manager.can_swap_in(
-                seq_group,
-                self._get_num_lookahead_slots(is_prefill, enable_chunking))
-            if alloc_status == AllocStatus.LATER:
+            alloc_status = set([block_manager.can_swap_in(seq_group, self._get_num_lookahead_slots(is_prefill, enable_chunking))
+                  for block_manager in self.block_managers])
+            if AllocStatus.LATER in alloc_status:
                 break
-            elif alloc_status == AllocStatus.NEVER:
+            elif AllocStatus.NEVER in alloc_status:
                 logger.warning(
                     "Failing the request %s because there's not enough kv "
                     "cache blocks to run the entire sequence.",
@@ -964,7 +963,7 @@ class Scheduler:
             self._allocate_and_set_running(seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
-                blocks_to_copy: List[Tuple[int, int]] = []
+                blocks_to_copy: List[List[Tuple[int, int]]] = []
                 # init_multi_step_from_lookahead_slots happens in append_slots
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 # This assert will trip when a copy-on-write happens. This is
@@ -1387,7 +1386,8 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
-        self.block_manager.free(seq)
+        for block_manager in self.block_managers:
+            block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
@@ -1437,7 +1437,7 @@ class Scheduler:
 
     def _append_slots(self,
                       seq_group: SequenceGroup,
-                      blocks_to_copy: List[Tuple[int, int]],
+                      blocks_to_copy: List[List[Tuple[int, int]]],
                       enable_chunking: bool = False) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
@@ -1468,14 +1468,15 @@ class Scheduler:
             seq_status = None
 
         for seq in seq_group.get_seqs(status=seq_status):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            block_manager = self.block_managers[-1]
+            cows = block_manager.append_slots(seq, num_lookahead_slots)
             if len(cows) > 0:
-                blocks_to_copy.extend(cows)
+                blocks_to_copy[-1].extend(cows)
 
     def _preempt(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[List[Tuple[int, int]]],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1532,33 +1533,36 @@ class Scheduler:
     def _preempt_by_swap(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[List[Tuple[int, int]]],
     ) -> None:
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_in: List[Tuple[int, int]],
+        blocks_to_swap_in: List[List[Tuple[int, int]]],
     ) -> None:
-        mapping = self.block_manager.swap_in(seq_group)
-        blocks_to_swap_in.extend(mapping)
+        for idx, block_manager in enumerate(self.block_managers):
+            mapping = block_manager.swap_in(seq_group)
+            blocks_to_swap_in[idx].extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
     def _swap_out(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out: List[List[Tuple[int, int]]],
     ) -> None:
-        if not self.block_manager.can_swap_out(seq_group):
+        can_swap_out = all([block_manager.can_swap_out(seq_group) for block_manager in self.block_managers])
+        if not can_swap_out:
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out(seq_group)
-        blocks_to_swap_out.extend(mapping)
+        for idx, block_manager in enumerate(self.block_managers):
+            mapping = block_manager.swap_out(seq_group)
+            blocks_to_swap_out[idx].extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
 

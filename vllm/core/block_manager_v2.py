@@ -500,7 +500,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 # to be touched for the swap.
                 num_blocks_touched += \
                     block_table.get_num_blocks_touched_by_append_slots(
-                        block_table.get_unseen_token_ids(seq.get_token_ids()),
+                        block_table.get_unseen_token_ids(
+                            seq.get_token_ids_by_partition(
+                                self.context_parallel_idx, 
+                                self.context_parallel_size)
+                        ),
                         num_lookahead_slots=num_lookahead_slots)
                 blocks.extend(block_table.blocks)
         # Compute the number of full blocks to touch and add it to the
