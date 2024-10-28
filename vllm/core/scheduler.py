@@ -1214,7 +1214,7 @@ class Scheduler:
             # chunked-prefill are enabled together.
             assert self.scheduler_config.is_multi_step and enable_chunking
 
-        return self.block_managers[-1].can_append_slots(
+        return self.block_managers[self.context_parallel_size-1].can_append_slots(
             seq_group=seq_group, num_lookahead_slots=num_lookahead_slots)
 
     def _allow_async_output_proc(self, seq_group: SequenceGroup) -> bool:
@@ -1466,12 +1466,11 @@ class Scheduler:
             # In multi-step chunked-prefill any sequence type can have
             # slots appended.
             seq_status = None
-
+        block_manager = self.block_managers[self.context_parallel_size-1]
         for seq in seq_group.get_seqs(status=seq_status):
-            block_manager = self.block_managers[-1]
             cows = block_manager.append_slots(seq, num_lookahead_slots)
             if len(cows) > 0:
-                blocks_to_copy[-1].extend(cows)
+                blocks_to_copy[self.context_parallel_size-1].extend(cows)
 
     def _preempt(
         self,
