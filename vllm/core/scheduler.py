@@ -121,11 +121,11 @@ class SchedulerOutputs:
     # Total number of batched tokens.
     num_batched_tokens: int
     # Blocks to swap in. List of CPU -> GPU block number.
-    blocks_to_swap_in: List[Tuple[int, int]]
+    blocks_to_swap_in: List[List[Tuple[int, int]]]
     # Blocks to swap out. List of GPU -> CPU block number.
-    blocks_to_swap_out: List[Tuple[int, int]]
+    blocks_to_swap_out: List[List[Tuple[int, int]]]
     # Blocks to copy. Source to dest block.
-    blocks_to_copy: List[Tuple[int, int]]
+    blocks_to_copy: List[List[Tuple[int, int]]]
     # Sequence groups that are going to be ignored.
     ignored_seq_groups: List[SequenceGroup]
     # The number of slots for lookahead decoding.
@@ -136,7 +136,11 @@ class SchedulerOutputs:
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
-        assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
+        has_swap_in = any(blocks_to_swap_in for blocks_to_swap_in in
+                            self.blocks_to_swap_in)
+        has_swap_out = any(blocks_to_swap_out for blocks_to_swap_out in
+                            self.blocks_to_swap_out)
+        assert not (has_swap_in and has_swap_out)
 
         self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
@@ -146,8 +150,11 @@ class SchedulerOutputs:
 
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
-        return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out and not self.blocks_to_copy)
+        has_blocks_to_swap_in = any(self.blocks_to_swap_in)
+        has_blocks_to_swap_out = any(self.blocks_to_swap_out)
+        has_blocks_to_copy = any(self.blocks_to_copy)
+        return (not self.scheduled_seq_groups and not has_blocks_to_swap_in
+                and not has_blocks_to_swap_out and not has_blocks_to_copy)
 
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
@@ -199,14 +206,14 @@ class SchedulerRunningOutputs:
     prefill_seq_groups_list: List[SequenceGroup]
 
     @classmethod
-    def create_empty(cls) -> "SchedulerRunningOutputs":
+    def create_empty(cls, context_parallel_size = 1) -> "SchedulerRunningOutputs":
         return SchedulerRunningOutputs(
             decode_seq_groups=[],
             prefill_seq_groups=[],
             preempted=[],
             swapped_out=[],
-            blocks_to_swap_out=[],
-            blocks_to_copy=[],
+            blocks_to_swap_out=[[] for _ in range(context_parallel_size)],
+            blocks_to_copy=[[] for _ in range(context_parallel_size)],
             num_lookahead_slots=0,
             decode_seq_groups_list=[],
             prefill_seq_groups_list=[],
@@ -235,12 +242,12 @@ class SchedulerSwappedInOutputs:
     infeasible_seq_groups: List[SequenceGroup]
 
     @classmethod
-    def create_empty(cls) -> "SchedulerSwappedInOutputs":
+    def create_empty(cls, context_parallel_size = 1) -> "SchedulerSwappedInOutputs":
         return SchedulerSwappedInOutputs(
             decode_seq_groups=[],
             prefill_seq_groups=[],
-            blocks_to_swap_in=[],
-            blocks_to_copy=[],
+            blocks_to_swap_in=[[] for _ in range(context_parallel_size)],
+            blocks_to_copy=[[] for _ in range(context_parallel_size)],
             num_lookahead_slots=0,
             infeasible_seq_groups=[],
         )
@@ -683,8 +690,8 @@ class Scheduler:
             SchedulerSwappedInOutputs.
         """
         # Blocks that need to be swapped or copied before model execution.
-        blocks_to_swap_in: List[Tuple[int, int]] = []
-        blocks_to_copy: List[Tuple[int, int]] = []
+        blocks_to_swap_in: List[List[Tuple[int, int]]] = []
+        blocks_to_copy: List[List[Tuple[int, int]]] = []
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
         infeasible_seq_groups: List[SequenceGroup] = []
@@ -1116,6 +1123,9 @@ class Scheduler:
         inter token latency because decodes requests don't need to be blocked
         by prefill requests.
         """
+        assert self.context_parallel_size == 1, (
+            "Chunked prefill policy is not supported with context parallelism")
+        
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
