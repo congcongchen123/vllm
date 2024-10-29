@@ -1091,7 +1091,8 @@ class Scheduler:
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
         blocks_to_copy = running_scheduled.blocks_to_copy
-        blocks_to_copy.extend(swapped_in.blocks_to_copy)
+        for idx, block_mapping in enumerate(swapped_in.blocks_to_copy):
+            blocks_to_copy[idx].extend(block_mapping)
 
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
