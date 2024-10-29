@@ -237,7 +237,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
                     token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
+                        seq.get_token_ids_by_partition(self.context_parallel_idx,self.context_parallel_size)),
                     num_lookahead_slots=num_lookahead_slots,
                 ))
 
