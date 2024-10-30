@@ -495,13 +495,28 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Compute tokens.
         cp_group = get_cp_group()
         context_parallel_size = cp_group.world_size
-        if context_parallel_size > 1 and inter_data.is_prompt:
-            assert context_len == 0
-            # Get the query token ids for the current context parallel rank.
-            tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
-            start_idx, end_idx = seq_data.get_start_end_index_by_partition(cp_group.rank, context_parallel_size)
-            input_positions = range(start_idx, end_idx)
-            seq_len = len(tokens)
+        if context_parallel_size > 1:
+            if inter_data.is_prompt:
+                assert context_len == 0
+                # Get the query token ids for the current context parallel rank.
+                tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
+                start_idx, end_idx = seq_data.get_start_end_index_by_partition(cp_group.rank, context_parallel_size)
+                input_positions = range(start_idx, end_idx)
+                seq_len = len(tokens)
+            else:
+                assert seq_len - context_len == 1
+                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                input_positions = range(context_len, seq_len)
+                # Now update context length and seq length
+                start_idx, end_idx = seq_data.get_start_end_index_by_partition(cp_group.rank, context_parallel_size)
+                if cp_group.rank < context_parallel_size -1:
+                    context_len = end_idx - start_idx
+                    seq_len = context_len + 1
+                else:
+                    # For last rank, end_idx - start_idx already contain the new token to compute.
+                    context_len = end_idx - start_idx - 1
+                    seq_len = context_len + 1
+
         else:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
             input_positions = range(context_len, seq_len)
