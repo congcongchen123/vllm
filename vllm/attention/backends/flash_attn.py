@@ -691,6 +691,9 @@ def ring_prefill_forward(
             softcap=logits_soft_cap,
         )
 
+    # Only need to pad the last query segment
+    
+    
     for step in range(cp_size):
         # Only need to exchange kv for cp_size - 1 times
         if step < cp_size - 1:

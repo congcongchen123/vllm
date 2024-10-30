@@ -1291,7 +1291,7 @@ class Scheduler:
                     block_manager.access_all_blocks_in_seq(seq, now)
 
             if self.cache_config.enable_prefix_caching:
-                assert(len(self.block_managers) == 1)
+                assert(len(self.block_managers) == 1), "prefix caching is not supported with context parallel"
                 common_computed_block_nums = (
                     self.block_managers[0].get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
