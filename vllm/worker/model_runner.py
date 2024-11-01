@@ -482,7 +482,6 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # already computed) and sequence length (total number of tokens).
 
         seq_len = seq_data.get_len()
-        seq_len_unmodified = seq_len
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
@@ -495,6 +494,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Compute tokens.
         cp_group = get_cp_group()
         context_parallel_size = cp_group.world_size
+        if seq_data._partition_size == -1:
+            seq_data._initialize_partition_idx(context_parallel_size)
         if context_parallel_size > 1:
             if inter_data.is_prompt:
                 assert context_len == 0
@@ -522,7 +523,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             input_positions = range(context_len, seq_len)
 
         inter_data.seq_lens[seq_idx] = seq_len
-        inter_data.seq_len_unmodified[seq_idx] = seq_len_unmodified
+        inter_data.seq_len_unmodified[seq_idx] = seq_data._partition_size
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)

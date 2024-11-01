@@ -176,6 +176,7 @@ class SequenceData(msgspec.Struct,
     # case of sequence parallel. This is used to store the start index of each
     # partition.
     _partition_start: List[int] = msgspec.field(default_factory=list)
+    _partition_size: int = -1
 
     @staticmethod
     def from_token_counts(*token_counts: Tuple[int, int]) -> "SequenceData":
@@ -288,23 +289,30 @@ class SequenceData(msgspec.Struct,
     
     def _initialize_partition_idx(self, context_parallel_size):
         """Only need to initialize the partition index for the sequence data once."""
-        base_partition_size = len(self.get_token_ids()) // context_parallel_size
-        remainder = len(self.get_token_ids()) % context_parallel_size 
-        for context_parallel_rank in range(context_parallel_size):   
-            if context_parallel_rank < remainder:
-                start = context_parallel_rank * (base_partition_size + 1)
-            else:
-                start = remainder * (base_partition_size + 1) + \
-                    (context_parallel_rank - remainder) * context_parallel_size
-            self._partition_start.append(start)
+        # base_partition_size = len(self.get_token_ids()) // context_parallel_size
+        # remainder = len(self.get_token_ids()) % context_parallel_size 
+        # for context_parallel_rank in range(context_parallel_size):   
+        #     if context_parallel_rank < remainder:
+        #         start = context_parallel_rank * (base_partition_size + 1)
+        #     else:
+        #         start = remainder * (base_partition_size + 1) + \
+        #             (context_parallel_rank - remainder) * context_parallel_size
+        #     self._partition_start.append(start)
+        token_len = len(self.get_token_ids())
+        if token_len % context_parallel_size == 0:
+            self._partition_size = token_len // context_parallel_size
+        else: 
+            self._partition_size = token_len // (context_parallel_size - 1)
     
     def get_start_end_index_by_partition(self, context_parallel_rank, context_parallel_size) -> Tuple[int, int]:
         # if alrady initialized, just return the start and end index
-        if len(self._partition_start) == 0:
+        # if len(self._partition_start) == 0:
+        #     self._initialize_partition_idx(context_parallel_size)
+        if self._partition_size == -1:
             self._initialize_partition_idx(context_parallel_size)
-        start =  self._partition_start[context_parallel_rank]
-        if context_parallel_rank + 1 < len(self._partition_start):
-            end = self._partition_start[context_parallel_rank + 1]
+        start =  self._partition_size * context_parallel_rank
+        if context_parallel_rank + 1 < context_parallel_size:
+            end = self._partition_size * (context_parallel_rank + 1)
         else:
             end = len(self.get_token_ids())
         return start, end

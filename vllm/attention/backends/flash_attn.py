@@ -298,7 +298,7 @@ class FlashAttentionMetadataBuilder(
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
-        self.seq_len_unmodified: List[int] = []
+        self.seq_len_partition_sizes: List[int] = []
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
@@ -322,14 +322,14 @@ class FlashAttentionMetadataBuilder(
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
-        for (seq_id, token_len, seq_len, curr_seq_len, seq_len_unmodified , query_len, context_len,
+        for (seq_id, token_len, seq_len, curr_seq_len, seq_len_partition_size , query_len, context_len,
              curr_sliding_window_block) in zip(
                  inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
                  inter_data.orig_seq_lens, inter_data.seq_lens, inter_data.seq_len_unmodified,
                  inter_data.query_lens, inter_data.context_lens,
                  inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
-
+            self.seq_len_partition_sizes.append(seq_len_partition_size)
             if is_prompt:
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
