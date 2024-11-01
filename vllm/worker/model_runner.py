@@ -498,6 +498,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_data._initialize_partition_idx(context_parallel_size)
         if context_parallel_size > 1:
             if inter_data.is_prompt:
+                # Doesn't support prefix-caching.
                 assert context_len == 0
                 # Get the query token ids for the current context parallel rank.
                 tokens = seq_data.get_token_ids_by_partition(cp_group.rank, context_parallel_size)
@@ -508,13 +509,16 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                 assert seq_len - context_len == 1
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 input_positions = range(context_len, seq_len)
-                # Now update context length and seq length
+                # Now update context length and seq length for current context parall rank.
                 start_idx, end_idx = seq_data.get_start_end_index_by_partition(cp_group.rank, context_parallel_size)
                 if cp_group.rank < context_parallel_size -1:
+                    # Not the last rank, the context sequence partition is always fixed during decoding stage.
                     context_len = end_idx - start_idx
+                    assert context_len == seq_data._partition_size
                     seq_len = context_len + 1
                 else:
-                    # For last rank, end_idx - start_idx already contain the new token to compute.
+                    # For last rank, end_idx - start_idx already contains the new token to compute.
+                    # And we only append the newly generated token to the last rank.
                     context_len = end_idx - start_idx - 1
                     seq_len = context_len + 1
 
