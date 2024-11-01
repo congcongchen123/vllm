@@ -1,6 +1,7 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from itertools import accumulate
 
 import torch
 
@@ -149,6 +150,9 @@ class FlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    cu_seqlens_k: Optional[torch.Tensor]
+    max_seqlen_k: int
+
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
 
@@ -183,6 +187,8 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            cu_seqlens_k=self.cu_seqlens_k,
+            max_seqlen_k=self.max_seqlen_k,
         )
         return self._cached_prefill_metadata
 
@@ -212,6 +218,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
+            cu_seqlens_k=self.cu_seqlens_k,
         )
         return self._cached_decode_metadata
 
@@ -453,10 +460,6 @@ class FlashAttentionMetadataBuilder(
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
-        from itertools import accumulate
-        cu_seqlens_k = torch.tensor([0] + list(accumulate(self.seq_len_partition_sizes)), 
-                                    dtype=torch.int32, 
-                                    device=device)
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -465,7 +468,10 @@ class FlashAttentionMetadataBuilder(
                      dim=0,
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
-
+        cu_seqlens_k = torch.tensor([0] + list(accumulate(self.seq_len_partition_sizes)), 
+                                    dtype=torch.int32, 
+                                    device=device)
+        max_seqlen_k = max(self.seq_len_partition_sizes, default=0)
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -482,6 +488,8 @@ class FlashAttentionMetadataBuilder(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_k=max_seqlen_k,
         )
 
 
@@ -712,8 +720,10 @@ def ring_prefill_forward(
             causal = step == 0
             if step == 0:
                 cu_seqlens_k = prefill_meta.seq_start_loc
+                max_seqlen_k = prefill_meta.max_prefill_seq_len
             else:
                 cu_seqlens_k = prefill_meta.cu_seqlens_k
+                max_seqlen_k = prefill_meta.max_seqlen_k
             block_out, block_lse = flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -721,7 +731,7 @@ def ring_prefill_forward(
                 cu_seqlens_q=prefill_meta.seq_start_loc,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=prefill_meta.max_prefill_seq_len,
-                max_seqlen_k=prefill_meta.max_prefill_seq_len,
+                max_seqlen_k=max_seqlen_k,
                 softmax_scale=softmax_scale,
                 causal=causal,
                 window_size=window_size,
@@ -769,12 +779,16 @@ def ring_decode_forward(
     assert attn_metadata.decode_metadata.decode_query_len == 1
     assert window_size is None or (window_size[0] == -1 and window_size[1] == -1)
     assert alibi_slopes is None
+    if cp_rank == cp_size - 1:
+        cache_seqlens = decode_meta.seq_lens_tensor
+    else:
+        cache_seqlens = decode_meta.cu_seqlens_k
     block_out, block_lse = flash_attn_with_kvcache(
         q=decode_query,
         k_cache=key_cache,
         v_cache=value_cache,
         block_table=decode_meta.block_tables,
-        cache_seqlens=decode_meta.seq_lens_tensor,
+        cache_seqlens=cache_seqlens,
         softmax_scale=softmax_scale,
         causal=cp_rank == cp_size - 1,
         alibi_slopes=alibi_slopes,
