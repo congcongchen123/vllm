@@ -453,6 +453,10 @@ class FlashAttentionMetadataBuilder(
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
+        from itertools import accumulate
+        cu_seqlens_k = torch.tensor([0] + list(accumulate(self.seq_len_partition_sizes)), 
+                                    dtype=torch.int32, 
+                                    device=device)
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -706,12 +710,16 @@ def ring_prefill_forward(
             
         if step <= cp_rank:
             causal = step == 0
+            if step == 0:
+                cu_seqlens_k = prefill_meta.seq_start_loc
+            else:
+                cu_seqlens_k = prefill_meta.cu_seqlens_k
             block_out, block_lse = flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
                 cu_seqlens_q=prefill_meta.seq_start_loc,
-                cu_seqlens_k=prefill_meta.seq_start_loc,
+                cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=prefill_meta.max_prefill_seq_len,
                 max_seqlen_k=prefill_meta.max_prefill_seq_len,
                 softmax_scale=softmax_scale,
