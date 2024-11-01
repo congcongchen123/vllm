@@ -682,9 +682,6 @@ def ring_prefill_forward(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
             Optional[Tuple[torch.Tensor]]]:
     assert attn_metadata.prefill_metadata is not None
-
-    next_k, next_v = None, None
-    send_recv_reqs = []
     cp_size = get_cp_group().world_size
     cp_rank = get_cp_group().rank_in_group
     prefill_meta = attn_metadata.prefill_metadata
@@ -706,13 +703,28 @@ def ring_prefill_forward(
 
     # Only need to pad the last query segment
     
-    
+    next_k, next_v = None, None
+    send_recv_reqs = []
+    token_size_padded = cu_seqlens_k[-1]
     for step in range(cp_size):
         # Only need to exchange kv for cp_size - 1 times
         if step < cp_size - 1:
             # Send KV to next rank asynchronously.
             # This way, we could overlap the communication with computation
             # as much as possible.
+            if prefill_meta.num_prefill_tokens < token_size_padded:
+                # padd key, and value so that the first dimension is token_size_padded
+                new_shape = list(token_size_padded, *key.shape[1:])
+                key = torch.cat([key, 
+                                torch.zeros(new_shape,
+                                            dtype=key.dtype, device=key.device)],
+                                            dim=0)
+                value = torch.cat([value,
+                                   torch.zeros(new_shape,
+                                               dtype=key.dtype, device=key.device)],
+                                               dim=0)
+            next_k = torch.empty_like(key)
+            next_v = torch.empty_like(value)   
             send_recv_reqs.extend(get_cp_group().send_recv(key, next_k))
             send_recv_reqs.extend(get_cp_group().send_recv(value, next_v))
             
@@ -726,8 +738,8 @@ def ring_prefill_forward(
                 max_seqlen_k = prefill_meta.max_seqlen_k
             block_out, block_lse = flash_attn_varlen_func(
                 q=query,
-                k=key,
-                v=value,
+                k=key[:prefill_meta.num_prefill_tokens],
+                v=value[:prefill_meta.num_prefill_tokens],
                 cu_seqlens_q=prefill_meta.seq_start_loc,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=prefill_meta.max_prefill_seq_len,
