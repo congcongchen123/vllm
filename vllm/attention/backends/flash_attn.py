@@ -712,21 +712,25 @@ def ring_prefill_forward(
             # Send KV to next rank asynchronously.
             # This way, we could overlap the communication with computation
             # as much as possible.
+            key_padded = key
+            value_padded = value
             if prefill_meta.num_prefill_tokens < token_size_padded:
+                # only the last rank needs to pad the key and value
+                assert cp_rank == cp_size - 1
                 # padd key, and value so that the first dimension is token_size_padded
-                new_shape = list(token_size_padded, *key.shape[1:])
-                key = torch.cat([key, 
+                new_shape = list(token_size_padded - prefill_meta.num_prefill_tokens, *key.shape[1:])
+                key_padded = torch.cat([key, 
                                 torch.zeros(new_shape,
                                             dtype=key.dtype, device=key.device)],
                                             dim=0)
-                value = torch.cat([value,
+                value_padded = torch.cat([value,
                                    torch.zeros(new_shape,
                                                dtype=key.dtype, device=key.device)],
                                                dim=0)
-            next_k = torch.empty_like(key)
-            next_v = torch.empty_like(value)   
-            send_recv_reqs.extend(get_cp_group().send_recv(key, next_k))
-            send_recv_reqs.extend(get_cp_group().send_recv(value, next_v))
+            next_k = torch.empty_like(key_padded)
+            next_v = torch.empty_like(value_padded)
+            send_recv_reqs.extend(get_cp_group().send_recv(key_padded, next_k))
+            send_recv_reqs.extend(get_cp_group().send_recv(value_padded, next_v))
             
         if step <= cp_rank:
             causal = step == 0
@@ -736,10 +740,11 @@ def ring_prefill_forward(
             else:
                 cu_seqlens_k = prefill_meta.cu_seqlens_k
                 max_seqlen_k = prefill_meta.max_seqlen_k
+            
             block_out, block_lse = flash_attn_varlen_func(
                 q=query,
-                k=key[:prefill_meta.num_prefill_tokens],
-                v=value[:prefill_meta.num_prefill_tokens],
+                k=key,
+                v=value,
                 cu_seqlens_q=prefill_meta.seq_start_loc,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=prefill_meta.max_prefill_seq_len,
