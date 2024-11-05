@@ -150,7 +150,10 @@ class FlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences of a partition (aligned).
+    # Used when context parallel size is bigger than 1.
     cu_seqlens_k: Optional[torch.Tensor]
+    # The maximum sequence length of a partition (aligned).
     max_seqlen_k: int
 
     _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
@@ -701,8 +704,6 @@ def ring_prefill_forward(
             softcap=logits_soft_cap,
         )
 
-    # Only need to pad the last query segment
-    
     next_k, next_v = None, None
     send_recv_reqs = []
     token_size_padded = cu_seqlens_k[-1]
@@ -716,6 +717,7 @@ def ring_prefill_forward(
             value_padded = value
             if prefill_meta.num_prefill_tokens < token_size_padded:
                 # only the last rank needs to pad the key and value
+                # For all other ranks, the query length is the same as the partition size.
                 assert cp_rank == cp_size - 1
                 # padd key, and value so that the first dimension is token_size_padded
                 new_shape = list(token_size_padded - prefill_meta.num_prefill_tokens, *key.shape[1:])
@@ -729,15 +731,18 @@ def ring_prefill_forward(
                                                dim=0)
             next_k = torch.empty_like(key_padded)
             next_v = torch.empty_like(value_padded)
-            send_recv_reqs.extend(get_cp_group().send_recv(key_padded, next_k))
-            send_recv_reqs.extend(get_cp_group().send_recv(value_padded, next_v))
-            
+            send_recv_reqs.extend(get_cp_group().send_recv(key_padded, next_k, batch_p2p_comm = False))
+            send_recv_reqs.extend(get_cp_group().send_recv(value_padded, next_v, batch_p2p_comm = False))
+
+        # Causal Attention
+        # Only need to compute the attention for the first cp_rank + 1 steps
         if step <= cp_rank:
-            causal = step == 0
+            causal = (step == 0)
             if step == 0:
                 cu_seqlens_k = prefill_meta.seq_start_loc
                 max_seqlen_k = prefill_meta.max_prefill_seq_len
             else:
+                # The key, and values are received from the previous rank.
                 cu_seqlens_k = prefill_meta.cu_seqlens_k
                 max_seqlen_k = prefill_meta.max_seqlen_k
             
@@ -928,6 +933,8 @@ def unified_flash_attention(
 
         else:
             # prefix-enabled attention
+            assert get_cp_group().world_size == 1, \
+                "prefix caching is not supported in context parallel"
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
