@@ -814,8 +814,9 @@ def ring_decode_forward(
     )
 
     # gather outputs from all ranks into rank 0
-    block_outs = get_cp_group().gather(block_out, 0)
-    block_lses = get_cp_group().gather(block_lse, 0)
+    last_rank = cp_size - 1
+    block_outs = get_cp_group().gather(block_out, last_rank)
+    block_lses = get_cp_group().gather(block_lse, last_rank)
 
     out = None
     lse = None

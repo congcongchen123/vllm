@@ -1728,7 +1728,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not self.is_driver_worker:
             return []
-
+        cp_rank = get_cp_group().rank_in_group
+        cp_size = get_cp_group().world_size
+        if cp_rank != cp_size - 1:
+            return []
         if model_input.async_callback is not None:
             model_input.async_callback()
 
