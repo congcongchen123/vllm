@@ -846,6 +846,7 @@ def ring_decode_forward(
         start = idx * batch_size
         end = (idx + 1) * batch_size
         out, lse = update_out_and_lse(out, lse, block_outs[start:end], block_lses[start:end])
+    assert block_out.shape == out.shape
     return out
 
 
