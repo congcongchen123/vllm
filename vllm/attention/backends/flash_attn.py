@@ -820,20 +820,32 @@ def ring_decode_forward(
         return_softmax=True,
     )
 
-    # gather outputs from all ranks into last rank.
-    last_rank = cp_size - 1
+    # # gather outputs from all ranks into last rank.
+    # last_rank = cp_size - 1
     
-    block_outs = get_cp_group().gather_tensor_list(block_out, last_rank)
-    block_lses = get_cp_group().gather_tensor_list(block_lse, last_rank)
+    # block_outs = get_cp_group().gather_tensor_list(block_out, last_rank)
+    # block_lses = get_cp_group().gather_tensor_list(block_lse, last_rank)
 
-    if block_outs is None:
-        assert block_lses is None
-        return None
+    # if block_outs is None:
+    #     assert block_lses is None
+    #     return None
+    
+    # out = None
+    # lse = None
+    # for idx in range(0, len(block_outs)):
+    #     out, lse = update_out_and_lse(out, lse, block_outs[idx], block_lses[idx])
+    # return out
+
+    block_outs = get_cp_group().all_gather(block_out, dim=0)
+    block_lses = get_cp_group().all_gather(block_lse, dim=0)
     
     out = None
     lse = None
-    for idx in range(0, len(block_outs)):
-        out, lse = update_out_and_lse(out, lse, block_outs[idx], block_lses[idx])
+    batch_size = block_out.shape[0]
+    for idx in range(cp_size):
+        start = idx * batch_size
+        end = (idx + 1) * batch_size
+        out, lse = update_out_and_lse(out, lse, block_outs[start:end], block_lses[start:end])
     return out
 
 
