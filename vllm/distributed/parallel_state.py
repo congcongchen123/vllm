@@ -440,6 +440,31 @@ class GroupCoordinator:
         else:
             output_tensor = None
         return output_tensor
+    
+    def gather_tensor_list(self,
+               input_: torch.Tensor,
+               dst: int = 0) -> Optional[List[torch.Tensor]]:
+        """
+        NOTE: We assume that the input tensor is on the same device across
+        all the ranks.
+        NOTE: `dst` is the local rank of the destination rank.
+        """
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return [input_]
+        # Allocate output tensor.
+        if self.rank_in_group == dst:
+            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+        else:
+            gather_list = None
+        # Gather.
+        torch.distributed.gather(input_,
+                                 gather_list,
+                                 dst=self.ranks[dst],
+                                 group=self.device_group)
+        return gather_list
+
 
     def broadcast(self, input_: torch.Tensor, src: int = 0):
         """Broadcast the input tensor.

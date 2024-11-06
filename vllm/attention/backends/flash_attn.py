@@ -651,10 +651,10 @@ def update_out_and_lse(
     slice_=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    out: (batch_size, seqlen, nheads, headdim).
-    lst: (batch_size, seqlen, nheads, 1).
-    block_out: (batch_size, seqlen, nheads, headdim).
-    block_lse: (batch_size, nheads, seqlen).
+    out: (n_tokens, nheads, headdim).
+    lse: (n_tokens, nheads, 1).
+    block_out: (n_tokens, nheads, headdim).
+    block_lse: (nheads, n_tokens).
     """
     if out is None:
         if slice_ is not None:
@@ -805,6 +805,8 @@ def ring_decode_forward(
         cache_seqlens = decode_meta.seq_lens_tensor
     else:
         cache_seqlens = decode_meta.cu_seqlens_k
+    # block_out: (batch_size, seqlen, nheads, headdim).
+    # block_lse:  (batch_size, nheads, seqlen).
     block_out, block_lse = flash_attn_with_kvcache(
         q=decode_query,
         k_cache=key_cache,
@@ -818,11 +820,16 @@ def ring_decode_forward(
         return_softmax=True,
     )
 
-    # gather outputs from all ranks into rank 0
+    # gather outputs from all ranks into last rank.
     last_rank = cp_size - 1
-    block_outs = get_cp_group().gather(block_out, last_rank)
-    block_lses = get_cp_group().gather(block_lse, last_rank)
+    
+    block_outs = get_cp_group().gather_tensor_list(block_out, last_rank)
+    block_lses = get_cp_group().gather_tensor_list(block_lse, last_rank)
 
+    if block_outs is None:
+        assert block_lses is None
+        return None
+    
     out = None
     lse = None
     for idx in range(0, len(block_outs)):
